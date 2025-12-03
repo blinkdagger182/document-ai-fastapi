@@ -82,5 +82,8 @@ def get_storage_service() -> StorageService:
         return GCSStorageService()
     elif settings.storage_backend == "s3":
         return S3StorageService()
+    elif settings.storage_backend == "supabase":
+        from app.services.supabase_storage import SupabaseStorageService
+        return SupabaseStorageService()
     else:
         raise ValueError(f"Unknown storage backend: {settings.storage_backend}")

@@ -1,24 +1,25 @@
-# Multi-stage build for production
-FROM python:3.11-slim as base
+# API Backend Dockerfile (No Celery/Redis)
+FROM python:3.11-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     gcc \
     g++ \
-    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy requirements
-COPY requirements.txt .
+# Copy API requirements (no Celery)
+COPY requirements-api.txt requirements.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY . .
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
 
 # Create temp directory for file processing
 RUN mkdir -p /tmp/documentai

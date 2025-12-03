@@ -14,6 +14,8 @@ Welcome to the DocumentAI backend documentation! This index will help you find w
 
 ### For Developers
 
+- **[SUPABASE_QUICKSTART.md](SUPABASE_QUICKSTART.md)** - Connect to Supabase in 5 minutes
+- **[SUPABASE_SETUP.md](SUPABASE_SETUP.md)** - Complete Supabase integration guide
 - **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)** - Comprehensive project overview
   - Technology choices and rationale
   - Data flow and architecture

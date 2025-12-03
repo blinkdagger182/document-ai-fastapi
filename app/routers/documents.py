@@ -25,7 +25,7 @@ from app.models.field import FieldRegion, FieldValue
 from app.services.storage import get_storage_service
 from app.utils.hashing import compute_file_hash
 from app.utils.logging import get_logger
-from app.workers.tasks import run_ocr, compose_pdf
+from app.services.cloud_tasks import get_cloud_tasks_service
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 logger = get_logger(__name__)
@@ -136,13 +136,14 @@ async def process_document(
             detail=f"Document cannot be processed in status: {document.status}"
         )
     
-    # Enqueue OCR task
-    run_ocr.delay(str(document_id))
+    # Enqueue OCR task via Cloud Tasks
+    cloud_tasks = get_cloud_tasks_service()
+    task_name = cloud_tasks.enqueue_ocr_task(str(document_id))
     
     document.status = DocumentStatus.processing
     db.commit()
     
-    logger.info(f"OCR task enqueued for document {document_id}")
+    logger.info(f"OCR task enqueued for document {document_id}: {task_name}")
     
     return ProcessDocumentResponse(
         documentId=document_id,
@@ -289,13 +290,14 @@ async def compose_document(
             detail="Document not found"
         )
     
-    # Enqueue compose task
-    compose_pdf.delay(str(document_id))
+    # Enqueue compose task via Cloud Tasks
+    cloud_tasks = get_cloud_tasks_service()
+    task_name = cloud_tasks.enqueue_compose_task(str(document_id))
     
     document.status = DocumentStatus.filling
     db.commit()
     
-    logger.info(f"PDF composition task enqueued for document {document_id}")
+    logger.info(f"PDF composition task enqueued for document {document_id}: {task_name}")
     
     return ProcessDocumentResponse(
         documentId=document_id,

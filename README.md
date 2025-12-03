@@ -15,13 +15,33 @@ Production-ready FastAPI backend for document OCR and form filling with PaddleOC
 ## 🏗️ Architecture
 
 - **API**: FastAPI + Uvicorn (GCP Cloud Run)
-- **Database**: PostgreSQL + SQLAlchemy 2.x + Alembic
-- **Workers**: Celery + Redis (GCP VM / Modal.com)
+- **Database**: PostgreSQL + SQLAlchemy 2.x + Alembic (Supabase or Cloud SQL)
+- **Workers**: Celery + Redis (GCP VM / Modal.com / Upstash)
 - **OCR**: PaddleOCR with GPU support
-- **Storage**: GCS or S3-compatible (Cloudflare R2)
+- **Storage**: GCS, S3-compatible, or Supabase Storage
 - **PDF**: PyMuPDF (fitz) for composition
 
 ## 🚀 Quick Start
+
+### Option 1: With Supabase (Recommended - Free Tier Available!)
+
+```bash
+# 1. Get your Supabase password from:
+# https://supabase.com/dashboard/project/iixekrmukkpdmmqoheed/settings/database
+
+# 2. Update .env with your Supabase connection
+# DATABASE_URL=postgresql://postgres.iixekrmukkpdmmqoheed:YOUR_PASSWORD@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+
+# 3. Install and run
+pip install -r requirements.txt
+alembic upgrade head
+python scripts/init_db.py
+uvicorn app.main:app --reload --port 8080
+```
+
+See [SUPABASE_QUICKSTART.md](SUPABASE_QUICKSTART.md) for detailed steps.
+
+### Option 2: With Local PostgreSQL
 
 ```bash
 # One-command setup
