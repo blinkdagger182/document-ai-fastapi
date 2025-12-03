@@ -10,11 +10,13 @@ psycopg2-binary==2.9.9
 pydantic==2.5.3
 pydantic-settings==2.1.0
 
-# OCR & PDF
-paddleocr==2.7.0.3
-paddlepaddle==3.0.0
-PyMuPDF==1.23.21
+# PDF (PyMuPDF first, before PaddleOCR)
+PyMuPDF==1.24.0
 Pillow==10.2.0
+
+# OCR (install after PyMuPDF)
+paddlepaddle==3.0.0
+paddleocr==2.8.1
 
 # Storage
 google-cloud-storage==2.14.0

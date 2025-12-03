@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Enum as SQLEnum
+from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Boolean, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -28,6 +28,7 @@ class Document(Base):
     status = Column(SQLEnum(DocumentStatus), default=DocumentStatus.imported, nullable=False, index=True)
     page_count = Column(Integer, nullable=True)
     hash_fingerprint = Column(String, nullable=True, index=True)
+    acroform = Column(Boolean, default=False, nullable=False)  # True if PDF has AcroForm fields
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
