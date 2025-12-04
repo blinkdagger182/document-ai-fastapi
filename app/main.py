@@ -34,7 +34,7 @@ async def startup_event():
     logger.info("DocumentAI API starting up...")
     logger.info(f"Environment: {settings.environment}")
     logger.info(f"Storage backend: {settings.storage_backend}")
-    logger.info(f"OCR backend: {settings.ocr_backend}")
+    logger.info(f"OCR worker URL: {settings.ocr_worker_url}")
 
 
 @app.on_event("shutdown")

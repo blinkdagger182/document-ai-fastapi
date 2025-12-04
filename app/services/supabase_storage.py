@@ -34,15 +34,22 @@ class SupabaseStorageService:
             with open(local_path, 'rb') as f:
                 file_content = f.read()
             
+            # Use upsert to overwrite if exists
             async with httpx.AsyncClient(timeout=300.0) as client:
                 response = await client.post(
                     f"{self.base_url}/object/{self.bucket}/{key}",
                     content=file_content,
                     headers={
                         **self.headers,
-                        "Content-Type": content_type
+                        "Content-Type": content_type,
+                        "x-upsert": "true"  # Allow overwriting
                     }
                 )
+                
+                # Log response for debugging
+                if response.status_code >= 400:
+                    logger.error(f"Supabase upload failed: {response.status_code} - {response.text}")
+                
                 response.raise_for_status()
             
             logger.info(f"Uploaded file to Supabase: {key}")

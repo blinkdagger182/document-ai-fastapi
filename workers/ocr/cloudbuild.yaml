@@ -3,9 +3,9 @@ steps:
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/documentai-ocr-worker'
+      - 'gcr.io/insta-440409/documentai-ocr-worker'
       - '-f'
       - 'workers/ocr/Dockerfile'
       - '.'
 images:
-  - 'gcr.io/$PROJECT_ID/documentai-ocr-worker'
+  - 'gcr.io/insta-440409/documentai-ocr-worker'

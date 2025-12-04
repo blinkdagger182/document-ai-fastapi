@@ -80,8 +80,7 @@ async def process_ocr(request: OCRRequest):
             tmp_path = tmp_file.name
         
         try:
-            import asyncio
-            asyncio.run(storage.download_to_path(key=doc.storage_key_original, local_path=tmp_path))
+            await storage.download_to_path(key=doc.storage_key_original, local_path=tmp_path)
             
             # Open PDF with PyMuPDF
             pdf_doc = fitz.open(tmp_path)
@@ -176,16 +175,25 @@ async def process_ocr(request: OCRRequest):
                 os.unlink(tmp_path)
     
     except Exception as e:
-        logger.error(f"Processing failed for document {document_id}: {str(e)}")
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Processing failed for document {document_id}: {error_msg}")
         import traceback
-        logger.error(traceback.format_exc())
+        traceback_str = traceback.format_exc()
+        logger.error(f"Full traceback:\n{traceback_str}")
+        print(f"ERROR: {error_msg}")  # Force print to stdout
+        print(f"TRACEBACK:\n{traceback_str}")  # Force print to stdout
         
-        doc = db.query(Document).filter(Document.id == UUID(document_id)).first()
-        if doc:
-            doc.status = DocumentStatus.failed
-            doc.error_message = str(e)
-            db.commit()
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            doc = db.query(Document).filter(Document.id == UUID(document_id)).first()
+            if doc:
+                doc.status = DocumentStatus.failed
+                doc.error_message = error_msg
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"Failed to update document status: {db_error}")
+            print(f"DB ERROR: {db_error}")
+        
+        raise HTTPException(status_code=500, detail=error_msg)
     
     finally:
         db.close()

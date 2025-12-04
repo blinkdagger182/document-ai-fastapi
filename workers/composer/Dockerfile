@@ -26,4 +26,4 @@ ENV PYTHONPATH=/app
 EXPOSE 8080
 
 # Run worker
-CMD ["python", "workers/composer/main.py"]
+CMD ["uvicorn", "workers.composer.main:app", "--host", "0.0.0.0", "--port", "8080"]
