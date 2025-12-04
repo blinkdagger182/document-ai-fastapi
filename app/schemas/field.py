@@ -38,9 +38,12 @@ class DocumentDetailResponse(BaseModel):
 
 
 class FieldValueInput(BaseModel):
-    fieldRegionId: UUID
+    fieldRegionId: UUID = Field(alias="field_region_id")
     value: str
     source: FieldSource = FieldSource.manual
+    
+    class Config:
+        populate_by_name = True  # Accept both camelCase and snake_case
 
 
 class SubmitValuesRequest(BaseModel):
