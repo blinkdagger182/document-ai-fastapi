@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import documents, health
+from app.routers import documents, health, hybrid
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -27,6 +27,7 @@ app.add_middleware(
 # Mount routers
 app.include_router(documents.router)
 app.include_router(health.router)
+app.include_router(hybrid.router)
 
 
 @app.on_event("startup")

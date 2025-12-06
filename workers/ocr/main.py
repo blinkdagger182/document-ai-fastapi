@@ -378,6 +378,173 @@ def classify_field_type_from_text(text: str) -> str:
         return "text"
 
 
+@app.post("/ocr-hybrid", response_model=OCRResponse)
+async def process_ocr_hybrid(request: OCRRequest):
+    """
+    Hybrid OCR processing using the new detection pipeline:
+    1. PDF Structure Detection (native PDF form fields)
+    2. Geometric Detection (OpenCV-based visual detection)
+    3. Vision AI Detection (optional, LLM-based)
+    4. Ensemble Merging (deduplication and prioritization)
+    
+    Called by Cloud Tasks.
+    """
+    document_id = request.document_id
+    logger.info(f"Starting hybrid detection for document {document_id}")
+    
+    db = SessionLocal()
+    try:
+        # Fetch document
+        doc = db.query(Document).filter(Document.id == UUID(document_id)).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Update status
+        doc.status = DocumentStatus.processing
+        db.commit()
+        
+        # Download file from storage
+        storage = get_storage_service()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_path = tmp_file.name
+        
+        try:
+            await storage.download_to_path(key=doc.storage_key_original, local_path=tmp_path)
+            
+            # Import hybrid pipeline components
+            sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+            from workers.hybrid_detection_pipeline import HybridDetectionPipeline
+            from workers.detection_models import DetectionSource
+            
+            # Create and run hybrid pipeline (without vision for worker - too slow)
+            pipeline = HybridDetectionPipeline(
+                vision_detector=None,  # Skip vision in worker for speed
+                debug=False,
+            )
+            
+            detections = pipeline.detect_fields_for_pdf(
+                pdf_path=tmp_path,
+                document_id=document_id,
+            )
+            
+            # Get page count
+            pdf_doc = fitz.open(tmp_path)
+            page_count = len(pdf_doc)
+            pdf_doc.close()
+            
+            # Check if any structure detections (indicates AcroForm)
+            acroform_detected = any(
+                d.source == DetectionSource.STRUCTURE
+                for d in detections
+            )
+            
+            # Convert detections to field region data
+            field_regions_data = []
+            for detection in detections:
+                field_regions_data.append({
+                    'page_index': detection.page_index,
+                    'x': detection.bbox.x,
+                    'y': detection.bbox.y,
+                    'width': detection.bbox.width,
+                    'height': detection.bbox.height,
+                    'field_type': detection.field_type.value,
+                    'label': detection.label[:255] if detection.label else "Unnamed Field",
+                    'confidence': detection.confidence,
+                    'template_key': detection.template_key,
+                })
+            
+            # Save field regions to database
+            for field_data in field_regions_data:
+                field_region = FieldRegion(
+                    document_id=doc.id,
+                    page_index=field_data['page_index'],
+                    x=field_data['x'],
+                    y=field_data['y'],
+                    width=field_data['width'],
+                    height=field_data['height'],
+                    field_type=FieldType[field_data['field_type']],
+                    label=field_data['label'],
+                    confidence=field_data['confidence'],
+                    template_key=field_data.get('template_key')
+                )
+                db.add(field_region)
+            
+            # Update document
+            doc.status = DocumentStatus.ready
+            doc.page_count = page_count
+            doc.acroform = acroform_detected
+            db.commit()
+            
+            # Log usage
+            usage_event = UsageEvent(
+                user_id=doc.user_id,
+                event_type=EventType.ocr_run,
+                value=1
+            )
+            db.add(usage_event)
+            
+            usage_event_pages = UsageEvent(
+                user_id=doc.user_id,
+                event_type=EventType.pages_processed,
+                value=page_count
+            )
+            db.add(usage_event_pages)
+            db.commit()
+            
+            logger.info(f"Hybrid processing completed for document {document_id}: {len(field_regions_data)} fields found")
+            
+            # Build response
+            response_fields = [
+                FieldRegionData(
+                    page_index=f['page_index'],
+                    x=f['x'],
+                    y=f['y'],
+                    width=f['width'],
+                    height=f['height'],
+                    field_type=f['field_type'],
+                    label=f['label'],
+                    confidence=f['confidence'],
+                    template_key=f.get('template_key')
+                )
+                for f in field_regions_data
+            ]
+            
+            return OCRResponse(
+                document_id=document_id,
+                status="ready",
+                acroform=acroform_detected,
+                fields_found=len(field_regions_data),
+                page_count=page_count,
+                field_regions=response_fields
+            )
+            
+        finally:
+            # Cleanup temp file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Hybrid processing failed for document {document_id}: {error_msg}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        logger.error(f"Full traceback:\n{traceback_str}")
+        
+        try:
+            doc = db.query(Document).filter(Document.id == UUID(document_id)).first()
+            if doc:
+                doc.status = DocumentStatus.failed
+                doc.error_message = error_msg
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"Failed to update document status: {db_error}")
+        
+        raise HTTPException(status_code=500, detail=error_msg)
+    
+    finally:
+        db.close()
+
+
 @app.get("/health")
 async def health():
     """Health check"""
