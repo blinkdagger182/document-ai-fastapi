@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     # Worker URLs (Cloud Run services)
     ocr_worker_url: str = ""
     compose_worker_url: str = ""
+    vision_worker_url: str = ""
+    
+    # Vision AI
+    openai_api_key: str = ""
+    gemini_api_key: str = ""
+    vision_provider: Literal["openai", "gemini"] = "openai"
+    vision_model: str = ""  # Defaults to gpt-4o-mini or gemini-1.5-flash
     
     class Config:
         env_file = ".env"
