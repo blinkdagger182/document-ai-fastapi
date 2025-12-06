@@ -337,21 +337,24 @@ class TestDetectionSource:
         Property 5: Source Priority
         
         Test that detection sources have correct priority ordering:
-        ACROFORM (1) > VISION (2) > GEOMETRIC (3) > STRUCTURE (4) > MERGED (5)
+        STRUCTURE (1) > GEOMETRIC (2) > VISION (3) > ACROFORM (4) > MERGED (5)
+        
+        Note: STRUCTURE has highest priority because native PDF form fields
+        are the most accurate source of field information.
         """
-        assert DetectionSource.ACROFORM.priority == 1
-        assert DetectionSource.VISION.priority == 2
-        assert DetectionSource.GEOMETRIC.priority == 3
-        assert DetectionSource.STRUCTURE.priority == 4
+        assert DetectionSource.STRUCTURE.priority == 1
+        assert DetectionSource.GEOMETRIC.priority == 2
+        assert DetectionSource.VISION.priority == 3
+        assert DetectionSource.ACROFORM.priority == 4
         assert DetectionSource.MERGED.priority == 5
     
     def test_detection_source_priority_comparison(self):
         """Test comparing detection sources by priority"""
-        # ACROFORM has highest priority (lowest number)
-        assert DetectionSource.ACROFORM.priority < DetectionSource.VISION.priority
-        assert DetectionSource.VISION.priority < DetectionSource.GEOMETRIC.priority
-        assert DetectionSource.GEOMETRIC.priority < DetectionSource.STRUCTURE.priority
-        assert DetectionSource.STRUCTURE.priority < DetectionSource.MERGED.priority
+        # STRUCTURE has highest priority (lowest number)
+        assert DetectionSource.STRUCTURE.priority < DetectionSource.GEOMETRIC.priority
+        assert DetectionSource.GEOMETRIC.priority < DetectionSource.VISION.priority
+        assert DetectionSource.VISION.priority < DetectionSource.ACROFORM.priority
+        assert DetectionSource.ACROFORM.priority < DetectionSource.MERGED.priority
 
 
 class TestFieldType:

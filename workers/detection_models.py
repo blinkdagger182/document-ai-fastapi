@@ -29,11 +29,11 @@ class DetectionSource(str, Enum):
     """
     Source of field detection.
     
-    Priority order (highest to lowest):
-    1. ACROFORM - Native PDF form fields (100% accurate)
-    2. VISION - AI semantic understanding (80-85% accurate)
-    3. GEOMETRIC - OpenCV line/box detection (catches what AI misses)
-    4. STRUCTURE - PDF object tree parsing (fallback)
+    Priority order (highest to lowest, lower number = higher priority):
+    1. STRUCTURE - PDF object tree parsing (native PDF forms, highest accuracy)
+    2. GEOMETRIC - OpenCV line/box detection (catches visual form elements)
+    3. VISION - AI semantic understanding (80-85% accurate)
+    4. ACROFORM - Legacy AcroForm fields
     5. MERGED - Result of ensemble merging multiple sources
     """
     ACROFORM = "acroform"
@@ -46,10 +46,10 @@ class DetectionSource(str, Enum):
     def priority(self) -> int:
         """Return priority value (lower = higher priority)"""
         priority_map = {
-            DetectionSource.ACROFORM: 1,
-            DetectionSource.VISION: 2,
-            DetectionSource.GEOMETRIC: 3,
-            DetectionSource.STRUCTURE: 4,
+            DetectionSource.STRUCTURE: 1,  # Highest priority
+            DetectionSource.GEOMETRIC: 2,
+            DetectionSource.VISION: 3,
+            DetectionSource.ACROFORM: 4,
             DetectionSource.MERGED: 5
         }
         return priority_map[self]
@@ -193,6 +193,28 @@ class BBox:
         height = y_max - y_min
         
         return width * height
+    
+    def iou(self, other: 'BBox') -> float:
+        """
+        Calculate Intersection over Union (IoU) with another bbox.
+        
+        IoU = intersection_area / union_area
+        
+        Args:
+            other: Another BBox instance
+            
+        Returns:
+            IoU value in range [0.0, 1.0]
+        """
+        intersection = self.intersection_area(other)
+        if intersection == 0.0:
+            return 0.0
+        
+        union = self.area() + other.area() - intersection
+        if union == 0.0:
+            return 0.0
+        
+        return intersection / union
     
     @classmethod
     def from_rect(cls, x_min: float, y_min: float, x_max: float, y_max: float) -> 'BBox':
