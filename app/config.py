@@ -39,11 +39,13 @@ class Settings(BaseSettings):
     # Cloud Tasks
     ocr_queue_name: str = "ocr-queue"
     compose_queue_name: str = "compose-queue"
+    commonforms_queue_name: str = "commonforms-queue"
     
     # Worker URLs (Cloud Run services)
     ocr_worker_url: str = ""
     compose_worker_url: str = ""
     vision_worker_url: str = ""
+    commonforms_worker_url: str = ""
     
     # Vision AI
     openai_api_key: str = ""

@@ -23,10 +23,12 @@ class CloudTasksService:
         self.location = settings.gcp_region
         self.ocr_queue = settings.ocr_queue_name
         self.compose_queue = settings.compose_queue_name
+        self.commonforms_queue = getattr(settings, 'commonforms_queue_name', 'commonforms-queue')
         
         # Worker URLs (Cloud Run services)
         self.ocr_worker_url = settings.ocr_worker_url
         self.compose_worker_url = settings.compose_worker_url
+        self.commonforms_worker_url = getattr(settings, 'commonforms_worker_url', '')
     
     def enqueue_ocr_task(self, document_id: str) -> str:
         """
@@ -114,6 +116,52 @@ class CloudTasksService:
         )
         
         logger.info(f"Enqueued compose task for document {document_id}: {response.name}")
+        return response.name
+    
+    def enqueue_commonforms_task(self, document_id: str, job_id: str) -> str:
+        """
+        Enqueue CommonForms processing task.
+        
+        Args:
+            document_id: UUID of document to process
+            job_id: Job ID for tracking
+            
+        Returns:
+            Task name
+        """
+        queue_path = self.client.queue_path(
+            self.project,
+            self.location,
+            self.commonforms_queue
+        )
+        
+        # Task payload
+        payload = {
+            "document_id": document_id,
+            "job_id": job_id
+        }
+        
+        # Create HTTP POST task
+        task = {
+            "http_request": {
+                "http_method": tasks_v2.HttpMethod.POST,
+                "url": f"{self.commonforms_worker_url}/process-commonforms",
+                "headers": {
+                    "Content-Type": "application/json"
+                },
+                "body": json.dumps(payload).encode(),
+                "oidc_token": {
+                    "service_account_email": settings.gcp_service_account_email
+                }
+            }
+        }
+        
+        # Schedule task
+        response = self.client.create_task(
+            request={"parent": queue_path, "task": task}
+        )
+        
+        logger.info(f"Enqueued CommonForms task for document {document_id}: {response.name}")
         return response.name
 
 

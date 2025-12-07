@@ -28,6 +28,7 @@ from .detection_models import BBox, FieldDetection, FieldType, DetectionSource
 from .pdf_structure_detector import PDFStructureDetector
 from .geometric_detector import GeometricDetector
 from .ensemble_merger import EnsembleMerger
+from .text_overlap_filter import TextOverlapFilter
 
 
 # Configure logging
@@ -100,7 +101,9 @@ class HybridDetectionPipeline:
         geometric_detector: Optional[GeometricDetector] = None,
         vision_detector: Optional[VisionDetectorProtocol] = None,
         ensemble_merger: Optional[EnsembleMerger] = None,
+        text_overlap_filter: Optional[TextOverlapFilter] = None,
         render_dpi: int = DEFAULT_RENDER_DPI,
+        enable_geometric_detection: bool = False,
         debug: bool = False,
     ):
         """
@@ -111,25 +114,33 @@ class HybridDetectionPipeline:
             geometric_detector: GeometricDetector instance (created if None)
             vision_detector: VisionDetector instance (optional, skipped if None)
             ensemble_merger: EnsembleMerger instance (created if None)
+            text_overlap_filter: TextOverlapFilter instance (created if None).
+                                 Filters out fields that overlap with existing text.
             render_dpi: DPI for rendering PDF pages to images
+            enable_geometric_detection: If False (default), skip geometric detection.
+                                        Geometric detection finds all rectangles/lines
+                                        indiscriminately, which can annotate text regions.
             debug: If True, enable verbose logging
         """
         self.debug = debug
         self.render_dpi = render_dpi
+        self.enable_geometric_detection = enable_geometric_detection
         
         # Initialize detectors (create defaults if not provided)
         self.pdf_structure_detector = pdf_structure_detector or PDFStructureDetector(debug=debug)
         self.geometric_detector = geometric_detector or GeometricDetector(debug=debug)
         self.vision_detector = vision_detector  # Optional, may be None
         self.ensemble_merger = ensemble_merger or EnsembleMerger(debug=debug)
+        self.text_overlap_filter = text_overlap_filter or TextOverlapFilter(debug=debug)
         
         if self.debug:
             logging.basicConfig(level=logging.DEBUG)
             logger.debug("HybridDetectionPipeline initialized")
             logger.debug(f"  PDF Structure Detector: {type(self.pdf_structure_detector).__name__}")
-            logger.debug(f"  Geometric Detector: {type(self.geometric_detector).__name__}")
+            logger.debug(f"  Geometric Detector: {type(self.geometric_detector).__name__} (enabled={self.enable_geometric_detection})")
             logger.debug(f"  Vision Detector: {type(self.vision_detector).__name__ if self.vision_detector else 'None'}")
             logger.debug(f"  Ensemble Merger: {type(self.ensemble_merger).__name__}")
+            logger.debug(f"  Text Overlap Filter: {type(self.text_overlap_filter).__name__} (threshold={self.text_overlap_filter.overlap_threshold})")
             logger.debug(f"  Render DPI: {self.render_dpi}")
     
     def detect_fields_for_pdf(
@@ -185,7 +196,19 @@ class HybridDetectionPipeline:
         )
         
         if self.debug:
-            logger.debug(f"Final merged result: {len(merged_fields)} fields")
+            logger.debug(f"Merged result: {len(merged_fields)} fields")
+        
+        # Step 5: Apply text overlap filter to remove fields overlapping with text
+        if self.text_overlap_filter is not None:
+            filtered_fields = self.text_overlap_filter.filter_fields(
+                merged_fields, pdf_path
+            )
+            if self.debug:
+                logger.debug(f"After text overlap filter: {len(filtered_fields)} fields (removed {len(merged_fields) - len(filtered_fields)})")
+            merged_fields = filtered_fields
+        
+        if self.debug:
+            logger.debug(f"Final result: {len(merged_fields)} fields")
         
         return merged_fields
     
@@ -227,8 +250,14 @@ class HybridDetectionPipeline:
             pdf_path: Path to the PDF file
         
         Returns:
-            List of FieldDetection objects (empty list on error)
+            List of FieldDetection objects (empty list on error or if disabled)
         """
+        # Check if geometric detection is enabled
+        if not self.enable_geometric_detection:
+            if self.debug:
+                logger.debug("Geometric detection is disabled, skipping")
+            return []
+        
         if self.geometric_detector is None:
             if self.debug:
                 logger.debug("Geometric Detector is None, skipping")

@@ -303,7 +303,7 @@ class TestDetectorExecution:
     """Tests that each detector is called correctly"""
     
     def test_all_detectors_called(self):
-        """Test that all detectors are called exactly once"""
+        """Test that all detectors are called exactly once (when geometric is enabled)"""
         fake_structure = FakePDFStructureDetector()
         fake_geometric = FakeGeometricDetector()
         fake_vision = FakeVisionDetector()
@@ -314,6 +314,7 @@ class TestDetectorExecution:
             geometric_detector=fake_geometric,
             vision_detector=fake_vision,
             ensemble_merger=fake_merger,
+            enable_geometric_detection=True,  # Explicitly enable for this test
         )
         
         pdf_path = create_blank_test_pdf(num_pages=2)
@@ -331,7 +332,7 @@ class TestDetectorExecution:
             os.unlink(pdf_path)
     
     def test_merger_receives_all_fields(self):
-        """Test that EnsembleMerger receives fields from all detectors"""
+        """Test that EnsembleMerger receives fields from all detectors (when geometric is enabled)"""
         fake_structure = FakePDFStructureDetector()
         fake_geometric = FakeGeometricDetector()
         fake_vision = FakeVisionDetector()
@@ -342,6 +343,7 @@ class TestDetectorExecution:
             geometric_detector=fake_geometric,
             vision_detector=fake_vision,
             ensemble_merger=fake_merger,
+            enable_geometric_detection=True,  # Explicitly enable for this test
         )
         
         pdf_path = create_blank_test_pdf(num_pages=2)
@@ -358,7 +360,7 @@ class TestDetectorExecution:
             os.unlink(pdf_path)
     
     def test_output_equals_merger_output(self):
-        """Test that pipeline output equals EnsembleMerger output"""
+        """Test that pipeline output equals EnsembleMerger output (when geometric is enabled, no text filter)"""
         fake_structure = FakePDFStructureDetector()
         fake_geometric = FakeGeometricDetector()
         fake_vision = FakeVisionDetector()
@@ -369,6 +371,8 @@ class TestDetectorExecution:
             geometric_detector=fake_geometric,
             vision_detector=fake_vision,
             ensemble_merger=fake_merger,
+            text_overlap_filter=None,  # Disable text filter for this test
+            enable_geometric_detection=True,  # Explicitly enable for this test
         )
         
         pdf_path = create_blank_test_pdf(num_pages=2)
@@ -397,7 +401,7 @@ class TestErrorHandling:
     """Tests for error handling when detectors fail"""
     
     def test_structure_detector_failure_continues(self):
-        """Test that pipeline continues when PDF structure detector fails"""
+        """Test that pipeline continues when PDF structure detector fails (with geometric enabled)"""
         fake_geometric = FakeGeometricDetector()
         fake_vision = FakeVisionDetector()
         fake_merger = FakeEnsembleMerger()
@@ -407,6 +411,7 @@ class TestErrorHandling:
             geometric_detector=fake_geometric,
             vision_detector=fake_vision,
             ensemble_merger=fake_merger,
+            enable_geometric_detection=True,  # Explicitly enable for this test
         )
         
         pdf_path = create_blank_test_pdf(num_pages=2)
@@ -455,7 +460,7 @@ class TestErrorHandling:
             os.unlink(pdf_path)
     
     def test_vision_detector_failure_continues(self):
-        """Test that pipeline continues when vision detector fails"""
+        """Test that pipeline continues when vision detector fails (with geometric enabled)"""
         fake_structure = FakePDFStructureDetector()
         fake_geometric = FakeGeometricDetector()
         fake_merger = FakeEnsembleMerger()
@@ -465,6 +470,7 @@ class TestErrorHandling:
             geometric_detector=fake_geometric,
             vision_detector=FailingVisionDetector(),
             ensemble_merger=fake_merger,
+            enable_geometric_detection=True,  # Explicitly enable for this test
         )
         
         pdf_path = create_blank_test_pdf(num_pages=2)
@@ -847,6 +853,174 @@ class TestEdgeCases:
             )
             
             assert fake_vision.last_document_id == "test-doc-123"
+            
+        finally:
+            os.unlink(pdf_path)
+
+
+# ============================================================================
+# Tests for Geometric Detection Flag (form-field-annotation-fix)
+# ============================================================================
+
+class TestGeometricDetectionFlag:
+    """
+    Tests for the enable_geometric_detection flag.
+    
+    **Feature: form-field-annotation-fix, Property 1: Geometric detector disabled by default**
+    **Feature: form-field-annotation-fix, Property 5: Geometric detector runs when explicitly enabled**
+    """
+    
+    def test_geometric_detection_disabled_by_default(self):
+        """
+        **Feature: form-field-annotation-fix, Property 1: Geometric detector disabled by default**
+        **Validates: Requirements 1.1**
+        
+        Test that geometric detection is disabled by default.
+        """
+        pipeline = HybridDetectionPipeline()
+        assert pipeline.enable_geometric_detection == False
+    
+    def test_geometric_detection_can_be_enabled(self):
+        """
+        Test that geometric detection can be explicitly enabled.
+        **Validates: Requirements 4.1, 4.3**
+        """
+        pipeline = HybridDetectionPipeline(enable_geometric_detection=True)
+        assert pipeline.enable_geometric_detection == True
+    
+    def test_no_geometric_fields_when_disabled(self):
+        """
+        **Feature: form-field-annotation-fix, Property 1: Geometric detector disabled by default**
+        **Validates: Requirements 1.1**
+        
+        Test that no geometric-sourced fields appear when geometric detection is disabled.
+        """
+        fake_structure = FakePDFStructureDetector()
+        fake_geometric = FakeGeometricDetector()
+        fake_merger = FakeEnsembleMerger()
+        
+        pipeline = HybridDetectionPipeline(
+            pdf_structure_detector=fake_structure,
+            geometric_detector=fake_geometric,
+            vision_detector=None,
+            ensemble_merger=fake_merger,
+            enable_geometric_detection=False,  # Explicitly disabled
+        )
+        
+        pdf_path = create_blank_test_pdf(num_pages=2)
+        
+        try:
+            result = pipeline.detect_fields_for_pdf(pdf_path)
+            
+            # Geometric detector should NOT be called
+            assert fake_geometric.call_count == 0
+            
+            # Merger should receive empty list for geometric
+            assert fake_merger.last_geometric_fields == []
+            
+            # No geometric-sourced fields in result
+            geometric_fields = [f for f in result if f.source == DetectionSource.GEOMETRIC]
+            assert len(geometric_fields) == 0
+            
+        finally:
+            os.unlink(pdf_path)
+    
+    def test_geometric_fields_appear_when_enabled(self):
+        """
+        **Feature: form-field-annotation-fix, Property 5: Geometric detector runs when explicitly enabled**
+        **Validates: Requirements 4.3**
+        
+        Test that geometric-sourced fields appear when geometric detection is enabled.
+        """
+        fake_structure = FakePDFStructureDetector(fields=[])
+        fake_geometric = FakeGeometricDetector()
+        fake_merger = FakeEnsembleMerger()
+        
+        pipeline = HybridDetectionPipeline(
+            pdf_structure_detector=fake_structure,
+            geometric_detector=fake_geometric,
+            vision_detector=None,
+            ensemble_merger=fake_merger,
+            enable_geometric_detection=True,  # Explicitly enabled
+        )
+        
+        pdf_path = create_blank_test_pdf(num_pages=2)
+        
+        try:
+            result = pipeline.detect_fields_for_pdf(pdf_path)
+            
+            # Geometric detector SHOULD be called (once per page)
+            assert fake_geometric.call_count == 2
+            
+            # Merger should receive geometric fields
+            assert len(fake_merger.last_geometric_fields) > 0
+            
+            # Geometric-sourced fields should appear in result
+            geometric_fields = [f for f in result if f.source == DetectionSource.GEOMETRIC]
+            assert len(geometric_fields) > 0
+            
+        finally:
+            os.unlink(pdf_path)
+    
+    @given(
+        enable_flag=st.booleans(),
+        num_geometric_fields=st.integers(min_value=1, max_value=5),
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_property_geometric_fields_controlled_by_flag(
+        self,
+        enable_flag: bool,
+        num_geometric_fields: int,
+    ):
+        """
+        **Feature: form-field-annotation-fix, Property 1 & 5: Geometric detection controlled by flag**
+        **Validates: Requirements 1.1, 4.3**
+        
+        Property: Geometric fields appear in results if and only if enable_geometric_detection is True.
+        """
+        # Create geometric fields
+        geometric_fields = [
+            create_field_detection(
+                page_index=0,
+                x=0.1 + i * 0.15,
+                y=0.1,
+                width=0.1,
+                height=0.05,
+                label=f"Geometric {i}",
+                source=DetectionSource.GEOMETRIC,
+            )
+            for i in range(num_geometric_fields)
+            if 0.1 + i * 0.15 + 0.1 <= 1.0
+        ]
+        
+        fake_structure = FakePDFStructureDetector(fields=[])
+        fake_geometric = FakeGeometricDetector(fields_per_page={0: geometric_fields})
+        fake_merger = FakeEnsembleMerger()
+        
+        pipeline = HybridDetectionPipeline(
+            pdf_structure_detector=fake_structure,
+            geometric_detector=fake_geometric,
+            vision_detector=None,
+            ensemble_merger=fake_merger,
+            enable_geometric_detection=enable_flag,
+        )
+        
+        pdf_path = create_blank_test_pdf(num_pages=1)
+        
+        try:
+            result = pipeline.detect_fields_for_pdf(pdf_path)
+            
+            # Count geometric fields in result
+            result_geometric_count = len([
+                f for f in result if f.source == DetectionSource.GEOMETRIC
+            ])
+            
+            if enable_flag:
+                # Should have geometric fields
+                assert result_geometric_count == len(geometric_fields)
+            else:
+                # Should have NO geometric fields
+                assert result_geometric_count == 0
             
         finally:
             os.unlink(pdf_path)
