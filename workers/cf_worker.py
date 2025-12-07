@@ -1,5 +1,5 @@
 """
-CommonForms Worker - Separate Cloud Run Service
+CommonForms Worker - Cloud Run Service
 Processes PDFs using CommonForms library to detect fields and generate fillable PDFs.
 """
 from fastapi import FastAPI, HTTPException
@@ -33,7 +33,7 @@ class FieldData(BaseModel):
     id: str
     type: str
     page: int
-    bbox: List[float]  # [x1, y1, x2, y2]
+    bbox: List[float]
     label: Optional[str] = None
 
 
@@ -55,43 +55,50 @@ async def process_commonforms(request: CommonFormsRequest):
     3. Upload fillable PDF to Supabase
     4. Save field metadata to DB
     5. Update document status
-    
-    Called by Cloud Tasks.
     """
     document_id = request.document_id
     job_id = request.job_id
-    logger.info(f"Starting CommonForms processing for document {document_id}, job {job_id}")
+    logger.info(f"[CF-WORKER] Starting CommonForms processing for document {document_id}, job {job_id}")
     
     db = SessionLocal()
     try:
-        # Fetch document
+        # Step 1: Fetch document metadata from Supabase
+        logger.info(f"[CF-WORKER] Step 1: Fetching document metadata")
         doc = db.query(Document).filter(Document.id == UUID(document_id)).first()
         if not doc:
+            logger.error(f"[CF-WORKER] Document not found: {document_id}")
             raise HTTPException(status_code=404, detail="Document not found")
+        
+        logger.info(f"[CF-WORKER] Found document: {doc.file_name}, storage_key: {doc.storage_key_original}")
         
         # Update status to processing
         doc.status = DocumentStatus.processing
         db.commit()
+        logger.info(f"[CF-WORKER] Updated document status to processing")
         
-        # Download file from storage
+        # Step 2: Download PDF from storage
         storage = get_storage_service()
         
         with tempfile.TemporaryDirectory() as tmp_dir:
             input_path = os.path.join(tmp_dir, "input.pdf")
             output_path = os.path.join(tmp_dir, "output.pdf")
             
-            # Download original PDF
+            logger.info(f"[CF-WORKER] Step 2: Downloading PDF from {doc.storage_key_original}")
             await storage.download_to_path(
                 key=doc.storage_key_original,
                 local_path=input_path
             )
-            logger.info(f"Downloaded PDF from {doc.storage_key_original}")
+            logger.info(f"[CF-WORKER] Downloaded PDF to {input_path}")
             
-            # Run CommonForms
+            # Verify file exists and has content
+            file_size = os.path.getsize(input_path)
+            logger.info(f"[CF-WORKER] Input PDF size: {file_size} bytes")
+            
+            # Step 3: Run CommonForms prepare_form()
+            logger.info(f"[CF-WORKER] Step 3: Running CommonForms prepare_form()")
             try:
                 from commonforms import prepare_form
                 
-                # prepare_form creates fillable PDF (doesn't return metadata)
                 prepare_form(
                     input_path,
                     output_path,
@@ -99,36 +106,51 @@ async def process_commonforms(request: CommonFormsRequest):
                     confidence=0.4,
                     device="cpu"
                 )
-                logger.info("CommonForms prepare_form completed")
+                logger.info(f"[CF-WORKER] CommonForms prepare_form() completed successfully")
                 
-                # Extract field metadata from the generated PDF
-                field_metadata = extract_fields_from_pdf(output_path)
-                logger.info(f"Extracted {len(field_metadata)} fields from output PDF")
+                # Verify output exists
+                if not os.path.exists(output_path):
+                    raise Exception("CommonForms did not generate output PDF")
+                
+                output_size = os.path.getsize(output_path)
+                logger.info(f"[CF-WORKER] Output PDF size: {output_size} bytes")
                 
             except ImportError as e:
-                logger.error(f"CommonForms not installed: {e}")
+                logger.error(f"[CF-WORKER] CommonForms not installed: {e}")
+                doc.status = DocumentStatus.failed
+                doc.error_message = "CommonForms library not installed"
+                db.commit()
                 raise HTTPException(
                     status_code=500,
-                    detail="CommonForms library not installed. Install: pip install git+https://github.com/jbarrow/commonforms.git"
+                    detail="CommonForms library not installed"
                 )
             except Exception as e:
-                logger.error(f"CommonForms processing failed: {e}")
+                logger.error(f"[CF-WORKER] CommonForms processing failed: {e}")
+                doc.status = DocumentStatus.failed
+                doc.error_message = f"CommonForms error: {str(e)}"
+                db.commit()
                 raise HTTPException(status_code=500, detail=f"CommonForms error: {str(e)}")
             
-            # Upload output PDF to Supabase
+            # Step 4: Extract field metadata from generated PDF
+            logger.info(f"[CF-WORKER] Step 4: Extracting fields from output PDF")
+            field_metadata = extract_fields_from_pdf(output_path)
+            logger.info(f"[CF-WORKER] Extracted {len(field_metadata)} fields")
+            
+            # Step 5: Upload output PDF to Supabase Storage
+            logger.info(f"[CF-WORKER] Step 5: Uploading fillable PDF to Supabase")
             output_key = f"commonforms/{doc.user_id}/{document_id}/fillable.pdf"
             output_url = await storage.upload_file(
                 local_path=output_path,
                 key=output_key,
                 content_type="application/pdf"
             )
-            logger.info(f"Uploaded fillable PDF to {output_key}")
+            logger.info(f"[CF-WORKER] Uploaded fillable PDF to {output_key}")
             
-            # Save field regions to DB
+            # Step 6: Save field regions to DB
+            logger.info(f"[CF-WORKER] Step 6: Saving field regions to database")
             fields_response = []
             
-            for field_data in field_metadata:
-                # Save to database
+            for idx, field_data in enumerate(field_metadata):
                 field_region = FieldRegion(
                     document_id=doc.id,
                     page_index=field_data['page'],
@@ -137,13 +159,13 @@ async def process_commonforms(request: CommonFormsRequest):
                     width=field_data['bbox'][2] - field_data['bbox'][0],
                     height=field_data['bbox'][3] - field_data['bbox'][1],
                     field_type=map_commonforms_type(field_data['type']),
-                    label=field_data.get('label', 'Unnamed Field'),
-                    confidence=1.0,  # CommonForms fields are definitive
+                    label=field_data.get('label', f'Field_{idx}'),
+                    confidence=1.0,
                     template_key=field_data.get('name')
                 )
                 db.add(field_region)
+                db.flush()  # Get the ID
                 
-                # Build response field
                 fields_response.append(FieldData(
                     id=str(field_region.id),
                     type=field_data['type'],
@@ -151,16 +173,20 @@ async def process_commonforms(request: CommonFormsRequest):
                     bbox=field_data['bbox'],
                     label=field_data.get('label')
                 ))
+                logger.info(f"[CF-WORKER] Saved field: {field_data.get('label', f'Field_{idx}')} ({field_data['type']})")
             
-            # Update document
+            # Step 7: Update document status
+            logger.info(f"[CF-WORKER] Step 7: Updating document status to ready")
             doc.status = DocumentStatus.ready
             doc.storage_key_filled = output_key
             db.commit()
             
-            logger.info(f"CommonForms processing completed for document {document_id}")
-            
             # Generate presigned URL for response
             presigned_url = storage.generate_presigned_url(key=output_key, expires_in=3600)
+            
+            logger.info(f"[CF-WORKER] ✅ CommonForms processing completed successfully")
+            logger.info(f"[CF-WORKER] Output URL: {presigned_url}")
+            logger.info(f"[CF-WORKER] Fields detected: {len(fields_response)}")
             
             return CommonFormsResponse(
                 job_id=job_id,
@@ -174,10 +200,10 @@ async def process_commonforms(request: CommonFormsRequest):
         raise
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
-        logger.error(f"CommonForms processing failed for document {document_id}: {error_msg}")
+        logger.error(f"[CF-WORKER] ❌ Processing failed: {error_msg}")
         
         import traceback
-        logger.error(f"Traceback:\n{traceback.format_exc()}")
+        logger.error(f"[CF-WORKER] Traceback:\n{traceback.format_exc()}")
         
         try:
             doc = db.query(Document).filter(Document.id == UUID(document_id)).first()
@@ -186,7 +212,7 @@ async def process_commonforms(request: CommonFormsRequest):
                 doc.error_message = error_msg
                 db.commit()
         except Exception as db_error:
-            logger.error(f"Failed to update document status: {db_error}")
+            logger.error(f"[CF-WORKER] Failed to update document status: {db_error}")
         
         raise HTTPException(status_code=500, detail=error_msg)
     
@@ -197,7 +223,6 @@ async def process_commonforms(request: CommonFormsRequest):
 def extract_fields_from_pdf(pdf_path: str) -> List[Dict]:
     """
     Extract AcroForm fields from the CommonForms-generated PDF.
-    CommonForms creates fillable PDFs with form fields that we can read.
     """
     import fitz  # PyMuPDF
     
@@ -209,7 +234,6 @@ def extract_fields_from_pdf(pdf_path: str) -> List[Dict]:
             page = pdf_doc[page_num]
             page_rect = page.rect
             
-            # Get all widgets (form fields) on this page
             for widget in page.widgets():
                 if widget is None:
                     continue
@@ -218,7 +242,7 @@ def extract_fields_from_pdf(pdf_path: str) -> List[Dict]:
                 field_type_code = widget.field_type
                 rect = widget.rect
                 
-                # Map PDF widget type to our field type
+                # Map PDF widget type
                 if field_type_code == fitz.PDF_WIDGET_TYPE_TEXT:
                     field_type = "text"
                 elif field_type_code == fitz.PDF_WIDGET_TYPE_BUTTON:
@@ -228,7 +252,7 @@ def extract_fields_from_pdf(pdf_path: str) -> List[Dict]:
                 else:
                     field_type = "text"
                 
-                # Infer type from field name (CommonForms naming convention)
+                # Infer from CommonForms naming convention
                 name_lower = field_name.lower()
                 if "checkbox" in name_lower or "choicebutton" in name_lower:
                     field_type = "checkbox"
@@ -258,45 +282,8 @@ def extract_fields_from_pdf(pdf_path: str) -> List[Dict]:
     return fields
 
 
-def parse_commonforms_fields(field_metadata) -> List[Dict]:
-    """
-    Parse CommonForms field metadata into our format.
-    CommonForms returns field info from prepare_form().
-    """
-    if not field_metadata:
-        return []
-    
-    fields = []
-    
-    # Handle different CommonForms output formats
-    if isinstance(field_metadata, list):
-        for idx, field in enumerate(field_metadata):
-            if isinstance(field, dict):
-                fields.append({
-                    'page': field.get('page', 0),
-                    'type': field.get('type', 'text'),
-                    'bbox': field.get('bbox', [0, 0, 100, 20]),
-                    'label': field.get('label', field.get('name', f'Field_{idx}')),
-                    'name': field.get('name', f'field_{idx}')
-                })
-    elif isinstance(field_metadata, dict):
-        # If it's a dict with fields key
-        if 'fields' in field_metadata:
-            return parse_commonforms_fields(field_metadata['fields'])
-        # Single field
-        fields.append({
-            'page': field_metadata.get('page', 0),
-            'type': field_metadata.get('type', 'text'),
-            'bbox': field_metadata.get('bbox', [0, 0, 100, 20]),
-            'label': field_metadata.get('label', 'Field'),
-            'name': field_metadata.get('name', 'field_0')
-        })
-    
-    return fields
-
-
 def map_commonforms_type(cf_type: str) -> FieldType:
-    """Map CommonForms field type to our FieldType enum."""
+    """Map CommonForms field type to FieldType enum."""
     type_map = {
         'text': FieldType.text,
         'textarea': FieldType.multiline,
@@ -312,7 +299,7 @@ def map_commonforms_type(cf_type: str) -> FieldType:
 
 @app.get("/health")
 async def health():
-    """Health check"""
+    """Health check endpoint"""
     return {"status": "ok", "service": "commonforms-worker"}
 
 

@@ -8,7 +8,7 @@ from typing import List, Optional
 from uuid import UUID, uuid4
 from datetime import datetime
 
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.models.document import Document, DocumentStatus
 from app.models.user import User
 from app.models.field import FieldRegion
@@ -39,6 +39,7 @@ class JobStatusResponse(BaseModel):
     status: str
     outputPdfUrl: Optional[str] = None
     fields: List[FieldInfo] = []
+    documentId: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -105,14 +106,133 @@ async def process_commonforms(
         logger.info(f"CommonForms task enqueued for document {document_id}: {task_name}")
         
     except Exception as e:
-        # If Cloud Tasks fails, try direct processing (for local dev)
-        logger.warning(f"Cloud Tasks unavailable, attempting direct processing: {e}")
+        # If Cloud Tasks fails, process directly in background (for local dev)
+        logger.warning(f"Cloud Tasks unavailable, starting background processing: {e}")
         _job_store[job_id]["status"] = "processing"
         
-        # Queue for background processing (in production, use Cloud Tasks)
-        # For now, mark as processing - the worker will pick it up
+        # Start background task for direct processing
+        import asyncio
+        asyncio.create_task(_process_commonforms_background(str(document_id), job_id))
     
     return ProcessCommonFormsResponse(jobId=job_id)
+
+
+async def _process_commonforms_background(document_id: str, job_id: str):
+    """
+    Background task to process CommonForms when Cloud Tasks is unavailable.
+    Updates the job store and document status directly.
+    """
+    import tempfile
+    import os
+    
+    logger.info(f"Starting background CommonForms processing for {document_id}")
+    
+    # Create new DB session for background task
+    db = SessionLocal()
+    
+    try:
+        document = db.query(Document).filter(Document.id == UUID(document_id)).first()
+        if not document:
+            _job_store[job_id]["status"] = "failed"
+            _job_store[job_id]["error"] = "Document not found"
+            return
+        
+        storage = get_storage_service()
+        
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_path = os.path.join(tmp_dir, "input.pdf")
+            output_path = os.path.join(tmp_dir, "output.pdf")
+            
+            # Download original PDF
+            await storage.download_to_path(
+                key=document.storage_key_original,
+                local_path=input_path
+            )
+            logger.info(f"Downloaded PDF for background processing")
+            
+            # Run CommonForms
+            try:
+                from commonforms import prepare_form
+                
+                prepare_form(
+                    input_path,
+                    output_path,
+                    model_or_path="FFDetr",
+                    confidence=0.4,
+                    device="cpu"
+                )
+                logger.info("CommonForms prepare_form completed")
+                
+                # Extract fields from generated PDF
+                field_metadata = _extract_fields_from_pdf(output_path)
+                logger.info(f"Extracted {len(field_metadata)} fields")
+                
+            except ImportError:
+                _job_store[job_id]["status"] = "failed"
+                _job_store[job_id]["error"] = "CommonForms library not installed"
+                return
+            except Exception as e:
+                _job_store[job_id]["status"] = "failed"
+                _job_store[job_id]["error"] = f"CommonForms error: {str(e)}"
+                return
+            
+            # Upload output PDF
+            output_key = f"commonforms/{document.user_id}/{document_id}/fillable.pdf"
+            await storage.upload_file(
+                local_path=output_path,
+                key=output_key,
+                content_type="application/pdf"
+            )
+            logger.info(f"Uploaded fillable PDF to {output_key}")
+            
+            # Save fields to DB
+            fields = []
+            for idx, field in enumerate(field_metadata):
+                field_region = FieldRegion(
+                    document_id=document.id,
+                    page_index=field.get('page', 0),
+                    x=field.get('bbox', [0, 0, 1, 1])[0],
+                    y=field.get('bbox', [0, 0, 1, 1])[1],
+                    width=field.get('bbox', [0, 0, 1, 1])[2] - field.get('bbox', [0, 0, 1, 1])[0],
+                    height=field.get('bbox', [0, 0, 1, 1])[3] - field.get('bbox', [0, 0, 1, 1])[1],
+                    field_type=_map_field_type(field.get('type', 'text')),
+                    label=field.get('label', f'Field_{idx}'),
+                    confidence=1.0,
+                    template_key=field.get('name')
+                )
+                db.add(field_region)
+                
+                fields.append({
+                    'id': str(field_region.id),
+                    'type': field.get('type', 'text'),
+                    'page': field.get('page', 0),
+                    'bbox': field.get('bbox', [0, 0, 1, 1]),
+                    'label': field.get('label')
+                })
+            
+            # Update document
+            document.status = DocumentStatus.ready
+            document.storage_key_filled = output_key
+            db.commit()
+            
+            # Generate presigned URL
+            output_url = storage.generate_presigned_url(key=output_key, expires_in=3600)
+            
+            # Update job store
+            _job_store[job_id]["status"] = "completed"
+            _job_store[job_id]["output_pdf_url"] = output_url
+            _job_store[job_id]["fields"] = fields
+            
+            logger.info(f"Background CommonForms processing completed for {document_id}")
+            
+    except Exception as e:
+        logger.error(f"Background CommonForms processing failed: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        _job_store[job_id]["status"] = "failed"
+        _job_store[job_id]["error"] = str(e)
+    finally:
+        db.close()
 
 
 @router.get("/status/{job_id}", response_model=JobStatusResponse)
@@ -173,7 +293,8 @@ async def get_job_status(
                     return JobStatusResponse(
                         status="completed",
                         outputPdfUrl=output_url,
-                        fields=fields
+                        fields=fields,
+                        documentId=document_id
                     )
                 
                 elif document.status == DocumentStatus.failed:
@@ -182,7 +303,8 @@ async def get_job_status(
                     
                     return JobStatusResponse(
                         status="failed",
-                        error=document.error_message
+                        error=document.error_message,
+                        documentId=document_id
                     )
         
         # Return current job status
@@ -190,6 +312,7 @@ async def get_job_status(
             status=job["status"],
             outputPdfUrl=job.get("output_pdf_url"),
             fields=[FieldInfo(**f) for f in job.get("fields", [])],
+            documentId=job.get("document_id"),
             error=job.get("error")
         )
     
@@ -385,3 +508,52 @@ def _map_field_type(cf_type: str):
         'signature': FieldType.signature,
     }
     return type_map.get(cf_type.lower(), FieldType.text)
+
+
+@router.post("/commonforms/{document_id}/mock", response_model=JobStatusResponse)
+async def process_commonforms_mock(
+    document_id: UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """
+    Mock CommonForms processing for testing iOS integration.
+    Returns the original PDF with fake detected fields.
+    Does NOT require CommonForms library.
+    """
+    # Validate document
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.user_id == user.id
+    ).first()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    storage = get_storage_service()
+    
+    # Generate presigned URL for original PDF (as mock "fillable" PDF)
+    output_url = storage.generate_presigned_url(
+        key=document.storage_key_original,
+        expires_in=3600
+    )
+    
+    # Return mock fields for testing
+    mock_fields = [
+        FieldInfo(id="mock-field-1", type="text", page=0, bbox=[0.1, 0.1, 0.4, 0.15], label="Name"),
+        FieldInfo(id="mock-field-2", type="text", page=0, bbox=[0.1, 0.2, 0.4, 0.25], label="Email"),
+        FieldInfo(id="mock-field-3", type="date", page=0, bbox=[0.1, 0.3, 0.3, 0.35], label="Date"),
+        FieldInfo(id="mock-field-4", type="checkbox", page=0, bbox=[0.1, 0.4, 0.15, 0.45], label="Agree to Terms"),
+        FieldInfo(id="mock-field-5", type="signature", page=0, bbox=[0.1, 0.5, 0.5, 0.6], label="Signature"),
+    ]
+    
+    logger.info(f"Mock CommonForms response for document {document_id}")
+    
+    return JobStatusResponse(
+        status="completed",
+        outputPdfUrl=output_url,
+        fields=mock_fields
+    )

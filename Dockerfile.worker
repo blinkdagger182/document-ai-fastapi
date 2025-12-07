@@ -1,7 +1,7 @@
-# Worker container with PaddleOCR
+# Worker container with CommonForms support
 FROM python:3.11-slim
 
-# Install system dependencies including OpenCV requirements
+# Install system dependencies for CommonForms + PDF processing
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     gcc \
@@ -12,6 +12,12 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgl1-mesa-glx \
+    # CommonForms dependencies
+    poppler-utils \
+    ghostscript \
+    libgl1 \
+    imagemagick \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -22,11 +28,17 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install CommonForms from GitHub
+RUN pip install --no-cache-dir git+https://github.com/jbarrow/commonforms.git
+
 # Copy application code
 COPY . .
 
 # Create temp directory
 RUN mkdir -p /tmp/documentai
 
-# Run Celery worker
-CMD ["celery", "-A", "app.workers.celery_app", "worker", "-Q", "ocr,compose", "--loglevel=info", "--concurrency=2"]
+# Expose port for Cloud Run
+EXPOSE 8081
+
+# Run CommonForms worker as FastAPI service
+CMD ["uvicorn", "workers.cf_worker:app", "--host", "0.0.0.0", "--port", "8081"]

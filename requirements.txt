@@ -39,7 +39,12 @@ PyMuPDF==1.23.8
 
 # CommonForms (requires Python 3.10+)
 # Install from GitHub: pip install git+https://github.com/jbarrow/commonforms.git
-# commonforms @ git+https://github.com/jbarrow/commonforms.git
+commonforms @ git+https://github.com/jbarrow/commonforms.git
+
+# PyTorch (CPU only for CommonForms)
+torch==2.1.0+cpu
+torchvision==0.16.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 # Testing
 pytest==7.4.4
