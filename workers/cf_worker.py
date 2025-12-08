@@ -99,10 +99,29 @@ async def process_commonforms(request: CommonFormsRequest):
             try:
                 from commonforms import prepare_form
                 
+                # Use local model path if available (baked into Docker image)
+                # Falls back to "FFDetr" which downloads from Hugging Face
+                model_path = os.environ.get("COMMONFORMS_MODEL_PATH", "FFDetr")
+                logger.info(f"[CF-WORKER] Using model path: {model_path}")
+                
+                # Debug: Check what exists at the model path
+                if os.path.exists(model_path):
+                    if os.path.isdir(model_path):
+                        logger.info(f"[CF-WORKER] Model path is a directory, contents: {os.listdir(model_path)}")
+                        # Look for .pth file in the directory
+                        pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
+                        if pth_files:
+                            model_path = os.path.join(model_path, pth_files[0])
+                            logger.info(f"[CF-WORKER] Found .pth file, using: {model_path}")
+                    else:
+                        logger.info(f"[CF-WORKER] Model path is a file")
+                else:
+                    logger.info(f"[CF-WORKER] Model path does not exist, will download from HuggingFace")
+                
                 prepare_form(
                     input_path,
                     output_path,
-                    model_or_path="FFDetr",
+                    model_or_path=model_path,
                     confidence=0.4,
                     device="cpu"
                 )

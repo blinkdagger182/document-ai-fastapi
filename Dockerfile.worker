@@ -29,6 +29,24 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install CommonForms from GitHub
 RUN pip install --no-cache-dir git+https://github.com/jbarrow/commonforms.git
 
+# Pre-download the FFDetr model during build (bake into image)
+# This avoids runtime downloads and Hugging Face rate limits
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+RUN python -c "from huggingface_hub import snapshot_download; \
+    import os; \
+    os.makedirs('/app/models', exist_ok=True); \
+    snapshot_download('jbarrow/FFDetr', local_dir='/app/models/FFDetr', token=os.environ.get('HF_TOKEN')); \
+    print('Downloaded files:'); \
+    import subprocess; \
+    subprocess.run(['find', '/app/models/FFDetr', '-type', 'f'])"
+# Clear the token from environment after download
+ENV HF_TOKEN=""
+
+# Set model path for CommonForms - point to the directory, CommonForms handles finding the weights
+# CommonForms expects a directory path containing the model files, not a .pth file directly
+ENV COMMONFORMS_MODEL_PATH=/app/models/FFDetr
+
 # Copy application code
 COPY . .
 

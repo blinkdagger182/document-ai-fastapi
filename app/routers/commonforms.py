@@ -120,119 +120,56 @@ async def process_commonforms(
 async def _process_commonforms_background(document_id: str, job_id: str):
     """
     Background task to process CommonForms when Cloud Tasks is unavailable.
-    Updates the job store and document status directly.
+    Calls the CommonForms worker directly via HTTP.
     """
-    import tempfile
-    import os
+    import httpx
+    from app.config import settings
     
     logger.info(f"Starting background CommonForms processing for {document_id}")
     
-    # Create new DB session for background task
-    db = SessionLocal()
+    worker_url = settings.commonforms_worker_url
+    if not worker_url:
+        _job_store[job_id]["status"] = "failed"
+        _job_store[job_id]["error"] = "CommonForms worker URL not configured"
+        return
     
     try:
-        document = db.query(Document).filter(Document.id == UUID(document_id)).first()
-        if not document:
-            _job_store[job_id]["status"] = "failed"
-            _job_store[job_id]["error"] = "Document not found"
-            return
-        
-        storage = get_storage_service()
-        
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            input_path = os.path.join(tmp_dir, "input.pdf")
-            output_path = os.path.join(tmp_dir, "output.pdf")
-            
-            # Download original PDF
-            await storage.download_to_path(
-                key=document.storage_key_original,
-                local_path=input_path
+        # Call the CommonForms worker directly
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            response = await client.post(
+                f"{worker_url}/process-commonforms",
+                json={
+                    "document_id": document_id,
+                    "job_id": job_id
+                }
             )
-            logger.info(f"Downloaded PDF for background processing")
             
-            # Run CommonForms
-            try:
-                from commonforms import prepare_form
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"CommonForms worker completed: {result}")
                 
-                prepare_form(
-                    input_path,
-                    output_path,
-                    model_or_path="FFDetr",
-                    confidence=0.4,
-                    device="cpu"
-                )
-                logger.info("CommonForms prepare_form completed")
-                
-                # Extract fields from generated PDF
-                field_metadata = _extract_fields_from_pdf(output_path)
-                logger.info(f"Extracted {len(field_metadata)} fields")
-                
-            except ImportError:
+                # Worker updates the document directly, so we just update job store
+                _job_store[job_id]["status"] = "completed"
+                if "output_url" in result:
+                    _job_store[job_id]["output_pdf_url"] = result["output_url"]
+                if "fields" in result:
+                    _job_store[job_id]["fields"] = result["fields"]
+            else:
+                error_msg = f"Worker returned {response.status_code}: {response.text}"
+                logger.error(error_msg)
                 _job_store[job_id]["status"] = "failed"
-                _job_store[job_id]["error"] = "CommonForms library not installed"
-                return
-            except Exception as e:
-                _job_store[job_id]["status"] = "failed"
-                _job_store[job_id]["error"] = f"CommonForms error: {str(e)}"
-                return
-            
-            # Upload output PDF
-            output_key = f"commonforms/{document.user_id}/{document_id}/fillable.pdf"
-            await storage.upload_file(
-                local_path=output_path,
-                key=output_key,
-                content_type="application/pdf"
-            )
-            logger.info(f"Uploaded fillable PDF to {output_key}")
-            
-            # Save fields to DB
-            fields = []
-            for idx, field in enumerate(field_metadata):
-                field_region = FieldRegion(
-                    document_id=document.id,
-                    page_index=field.get('page', 0),
-                    x=field.get('bbox', [0, 0, 1, 1])[0],
-                    y=field.get('bbox', [0, 0, 1, 1])[1],
-                    width=field.get('bbox', [0, 0, 1, 1])[2] - field.get('bbox', [0, 0, 1, 1])[0],
-                    height=field.get('bbox', [0, 0, 1, 1])[3] - field.get('bbox', [0, 0, 1, 1])[1],
-                    field_type=_map_field_type(field.get('type', 'text')),
-                    label=field.get('label', f'Field_{idx}'),
-                    confidence=1.0,
-                    template_key=field.get('name')
-                )
-                db.add(field_region)
+                _job_store[job_id]["error"] = error_msg
                 
-                fields.append({
-                    'id': str(field_region.id),
-                    'type': field.get('type', 'text'),
-                    'page': field.get('page', 0),
-                    'bbox': field.get('bbox', [0, 0, 1, 1]),
-                    'label': field.get('label')
-                })
-            
-            # Update document
-            document.status = DocumentStatus.ready
-            document.storage_key_filled = output_key
-            db.commit()
-            
-            # Generate presigned URL
-            output_url = storage.generate_presigned_url(key=output_key, expires_in=3600)
-            
-            # Update job store
-            _job_store[job_id]["status"] = "completed"
-            _job_store[job_id]["output_pdf_url"] = output_url
-            _job_store[job_id]["fields"] = fields
-            
-            logger.info(f"Background CommonForms processing completed for {document_id}")
-            
+    except httpx.TimeoutException:
+        logger.error("CommonForms worker timed out")
+        _job_store[job_id]["status"] = "failed"
+        _job_store[job_id]["error"] = "Processing timed out"
     except Exception as e:
         logger.error(f"Background CommonForms processing failed: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         _job_store[job_id]["status"] = "failed"
         _job_store[job_id]["error"] = str(e)
-    finally:
-        db.close()
 
 
 @router.get("/status/{job_id}", response_model=JobStatusResponse)
