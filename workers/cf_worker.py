@@ -23,6 +23,86 @@ from app.utils.logging import get_logger
 app = FastAPI(title="DocumentAI CommonForms Worker")
 logger = get_logger(__name__)
 
+# Monkey patch commonforms AFTER import to fix tuple issue
+# The issue is that rfdetr returns tuple but commonforms expects Detections object
+def apply_commonforms_patch():
+    try:
+        from supervision import Detections
+        import numpy as np
+        import commonforms.inference
+        
+        # Get the FFDetrDetector class
+        FFDetrDetector = commonforms.inference.FFDetrDetector
+        
+        # Store original extract_widgets method
+        original_extract_widgets = FFDetrDetector.extract_widgets
+        
+        def patched_extract_widgets(self, pages, confidence=0.4, image_size=1120, batch_size=3):
+            """Patched version that handles tuple results from model.predict()"""
+            from commonforms.inference import batch, Widget, BoundingBox, sort_widgets
+            import logging
+            
+            image_size = 1024
+            results = []
+            for b in batch([p.image for p in pages], n=batch_size):
+                predictions = self.model.predict(b, threshold=confidence)
+                
+                logger.info(f"[PATCH] model.predict returned type: {type(predictions)}")
+                
+                # FIX: Convert tuple to Detections BEFORE wrapping in list
+                if isinstance(predictions, tuple):
+                    logger.info(f"[PATCH] Converting tuple to Detections (len={len(predictions)})")
+                    if len(predictions) >= 3:
+                        predictions = Detections(
+                            xyxy=np.array(predictions[0]) if not isinstance(predictions[0], np.ndarray) else predictions[0],
+                            class_id=np.array(predictions[1]) if not isinstance(predictions[1], np.ndarray) else predictions[1],
+                            confidence=np.array(predictions[2]) if not isinstance(predictions[2], np.ndarray) else predictions[2]
+                        )
+                        logger.info(f"[PATCH] Converted to Detections with {len(predictions)} detections")
+                    else:
+                        logger.error(f"[PATCH] Unexpected tuple format: {len(predictions)} elements")
+                        predictions = Detections(xyxy=np.array([]), class_id=np.array([]), confidence=np.array([]))
+                
+                if len(pages) == 1 or batch_size == 1:
+                    predictions = [predictions]
+                results.extend(predictions)
+
+            widgets = {}
+
+            for page_ix, detections in enumerate(results):
+                logging.info(f"  Page {page_ix}: {len(detections)} fields detected")
+                detections = detections.with_nms(threshold=0.1, class_agnostic=True)
+                logging.info(f"\t\t{len(detections)} after nms")
+                widgets[page_ix] = []
+
+                for class_id, box in zip(detections.class_id, detections.xyxy):
+                    x0, x1 = box[[0, 2]] / pages[page_ix].image.width
+                    y0, y1 = box[[1, 3]] / pages[page_ix].image.height
+
+                    widget_type = self.id_to_cls[class_id]
+
+                    widgets[page_ix].append(
+                        Widget(
+                            widget_type=widget_type,
+                            bounding_box=BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1),
+                            page=page_ix,
+                        )
+                    )
+
+                widgets[page_ix] = sort_widgets(widgets[page_ix])
+
+            return widgets
+        
+        # Apply the patch
+        FFDetrDetector.extract_widgets = patched_extract_widgets
+        logger.info("[PATCH] Successfully patched commonforms.inference.FFDetrDetector.extract_widgets")
+        return True
+    except Exception as e:
+        logger.error(f"[PATCH] Failed to patch commonforms: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
 
 class CommonFormsRequest(BaseModel):
     document_id: str
@@ -99,31 +179,23 @@ async def process_commonforms(request: CommonFormsRequest):
             try:
                 from commonforms import prepare_form
                 
-                # Use local model path if available (baked into Docker image)
-                # Falls back to "FFDetr" which downloads from Hugging Face
-                model_path = os.environ.get("COMMONFORMS_MODEL_PATH", "FFDetr")
-                logger.info(f"[CF-WORKER] Using model path: {model_path}")
+                # Apply patch to fix tuple issue
+                patch_result = apply_commonforms_patch()
+                logger.info(f"[CF-WORKER] Patch application result: {patch_result}")
+                if not patch_result:
+                    raise Exception("Failed to apply commonforms patch")
                 
-                # Debug: Check what exists at the model path
-                if os.path.exists(model_path):
-                    if os.path.isdir(model_path):
-                        logger.info(f"[CF-WORKER] Model path is a directory, contents: {os.listdir(model_path)}")
-                        # Look for .pth file in the directory
-                        pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
-                        if pth_files:
-                            model_path = os.path.join(model_path, pth_files[0])
-                            logger.info(f"[CF-WORKER] Found .pth file, using: {model_path}")
-                    else:
-                        logger.info(f"[CF-WORKER] Model path is a file")
-                else:
-                    logger.info(f"[CF-WORKER] Model path does not exist, will download from HuggingFace")
+                # Use "FFDetr" - CommonForms will use HuggingFace cache if available
+                # The model is pre-downloaded during Docker build, so it uses the cache
+                logger.info(f"[CF-WORKER] Using model: FFDetr (with tuple fix patch applied)")
                 
                 prepare_form(
                     input_path,
                     output_path,
-                    model_or_path=model_path,
+                    model_or_path="FFDetr",
                     confidence=0.4,
-                    device="cpu"
+                    device="cpu",
+                    batch_size=1
                 )
                 logger.info(f"[CF-WORKER] CommonForms prepare_form() completed successfully")
                 
@@ -320,6 +392,24 @@ def map_commonforms_type(cf_type: str) -> FieldType:
 async def health():
     """Health check endpoint"""
     return {"status": "ok", "service": "commonforms-worker"}
+
+
+@app.get("/test-patch")
+async def test_patch():
+    """Test if the patch can be applied"""
+    try:
+        result = apply_commonforms_patch()
+        return {
+            "patch_applied": result,
+            "message": "Patch applied successfully" if result else "Patch failed"
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "patch_applied": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 if __name__ == "__main__":

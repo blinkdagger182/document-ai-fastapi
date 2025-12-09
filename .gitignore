@@ -27,3 +27,4 @@ uploads/
 *.jpeg
 service-account.json
 .hypothesis
+test_env

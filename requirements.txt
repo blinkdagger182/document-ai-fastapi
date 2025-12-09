@@ -38,6 +38,8 @@ scipy>=1.12.0
 PyMuPDF>=1.23.8
 
 # CommonForms (requires Python 3.10+)
+# Pin supervision to avoid tuple/Detections issues
+supervision>=0.24.0
 commonforms @ git+https://github.com/jbarrow/commonforms.git
 
 # PyTorch (CPU only for CommonForms)

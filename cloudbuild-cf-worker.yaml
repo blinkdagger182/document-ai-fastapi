@@ -1,0 +1,5 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/insta-440409/documentai-cf-worker', '-f', 'Dockerfile.worker', '.']
+images:
+  - 'gcr.io/insta-440409/documentai-cf-worker'
